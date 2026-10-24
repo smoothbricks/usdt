@@ -1,0 +1,11 @@
+[package]
+name = "cross-target-build"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+usdt = { path = "../../../usdt" }
+
+[build-dependencies]
+usdt = { path = "../../../usdt" }

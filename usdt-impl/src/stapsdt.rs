@@ -22,60 +22,24 @@
 #[path = "stapsdt/args.rs"]
 mod args;
 
+use crate::target::Architecture;
 use crate::{common, DataType};
 use crate::{Probe, Provider};
 use args::format_argument;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use std::convert::TryFrom;
-
-pub fn compile_provider_source(
-    source: &str,
-    config: &crate::CompileProvidersConfig,
-) -> Result<TokenStream, crate::Error> {
-    let dfile = dtrace_parser::File::try_from(source)?;
-    let providers = dfile
-        .providers()
-        .iter()
-        .map(|provider| {
-            let provider = Provider::from(provider);
-            // Ensure that the name of the module in the config is set, either by the caller or
-            // defaulting to the provider name.
-            let config = crate::CompileProvidersConfig {
-                provider: Some(provider.name.clone()),
-                probe_format: config.probe_format.clone(),
-                module: match &config.module {
-                    None => Some(provider.name.clone()),
-                    other => other.clone(),
-                },
-            };
-            compile_provider(&provider, &config)
-        })
-        .collect::<Vec<_>>();
-    Ok(quote! {
-        #(#providers)*
-    })
-}
 
 pub fn compile_provider_from_definition(
     provider: &Provider,
     config: &crate::CompileProvidersConfig,
+    arch: Architecture,
 ) -> TokenStream {
-    compile_provider(provider, config)
-}
-
-fn compile_provider(provider: &Provider, config: &crate::CompileProvidersConfig) -> TokenStream {
     let probe_impls = provider
         .probes
         .iter()
-        .map(|probe| compile_probe(provider, probe, config))
-        .collect::<Vec<_>>();
+        .map(|probe| compile_probe(provider, probe, config, arch));
     let module = config.module_ident();
-    quote! {
-        pub(crate) mod #module {
-            #(#probe_impls)*
-        }
-    }
+    quote! { pub(crate) mod #module { #(#probe_impls)* } }
 }
 
 /// ## Emit a SystemTap probe (version 3 format).
@@ -125,13 +89,18 @@ fn compile_provider(provider: &Provider, config: &crate::CompileProvidersConfig)
 /// then the above `nop()` instruction will turn into an interrupt instruction
 /// that transfers control to the kernel which will then run the probe's kernel
 /// side code (such as an eBPF program).
-fn emit_probe_record(prov: &str, probe: &str, types: Option<&[DataType]>) -> String {
+fn emit_probe_record(
+    prov: &str,
+    probe: &str,
+    types: Option<&[DataType]>,
+    arch: Architecture,
+) -> String {
     let sema_name = format!("__usdt_sema_{}_{}", prov, probe);
     let arguments = types.map_or_else(String::new, |types| {
         types
             .iter()
             .enumerate()
-            .map(format_argument)
+            .map(|argument| format_argument(argument, arch))
             .collect::<Vec<_>>()
             .join(" ")
     });
@@ -191,9 +160,10 @@ fn compile_probe(
     provider: &Provider,
     probe: &Probe,
     config: &crate::CompileProvidersConfig,
+    arch: Architecture,
 ) -> TokenStream {
-    let (unpacked_args, in_regs) = common::construct_probe_args(&probe.types);
-    let probe_rec = emit_probe_record(&provider.name, &probe.name, Some(&probe.types));
+    let (unpacked_args, in_regs) = common::construct_probe_args(&probe.types, arch);
+    let probe_rec = emit_probe_record(&provider.name, &probe.name, Some(&probe.types), arch);
     let type_check_fn = common::construct_type_check(
         &provider.name,
         &probe.name,
@@ -234,6 +204,7 @@ fn compile_probe(
     common::build_probe_macro(config, &probe.name, &probe.types, impl_block)
 }
 
+#[cfg(usdt_backend_stapsdt)]
 pub fn register_probes() -> Result<(), crate::Error> {
     Ok(())
 }

@@ -222,6 +222,32 @@ comes with significant tradeoffs. As such the current recommendation is:
 function calling it), and document to their users that this function should be called to
 guarantee that probes are registered.
 
+## Cross-compilation
+
+All three provider interfaces select their backend and argument ABI in the consuming
+compilation, not on the machine running the procedural macro or build script. The first
+expansion emits small target-cfg-gated invocations; only the selected invocation generates
+probe code. In particular, a macOS host targeting Linux emits ELF SystemTap notes and
+Linux register operands without invoking the host's DTrace tool. Builder output makes the
+same selection when it is included in the consumer, with no caller-side target shim.
+Runtime registration remains compiled for the application's target.
+
+The instrumented backends support 64-bit x86-64 and AArch64 on macOS and Linux, and
+64-bit x86-64 on illumos, Solaris, and FreeBSD. Other architectures on those systems
+produce an explicit compilation error. Operating systems without a tracing backend retain
+the no-op implementation, including argument type checks without evaluating the closures.
+
+Cross-compilation requires the Rust target and tools for any transitive C or assembly code, even for library-only
+builds, plus any target linker or SDK needed by the application. The macOS backend additionally requires a working Apple-compatible
+`dtrace -h` on the build host and the Apple linker for the target. Missing or failed
+DTrace tooling is an error; it does not silently select a different backend. Linux target
+generation does not require DTrace on the host.
+
+The consumer fixtures in tests/cross-target cover all three definition routes. The cross-target CI job uses Zig and
+cargo-zigbuild for target C compilation, checks native disabled-argument behavior and Mach-O probe symbols, then
+inspects the cross-compiled ELF SystemTap notes and argument ABI. An uninstrumented control must fail the probe oracle.
+The executable command sequence is maintained in .github/workflows/rust.yml.
+
 ## Supported platforms
 
 As of v0.6.0, this crate supports:
@@ -229,8 +255,7 @@ As of v0.6.0, this crate supports:
 - illumos and other Solaris derivatives
 - macOS
 - FreeBSD
-- x86-64 Linux, through the emission of SystemTap v3 probes. ARM support is not
-  tested, but may work by accident.
+- 64-bit Linux (x86-64 and AArch64), through the emission of SystemTap v3 probes.
 
 ## References
 

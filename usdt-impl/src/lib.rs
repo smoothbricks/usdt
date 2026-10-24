@@ -22,16 +22,25 @@ use thiserror::Error;
 #[cfg(any(usdt_backend_standard, usdt_backend_stapsdt, feature = "des"))]
 pub mod record;
 
-#[cfg_attr(usdt_backend_noop, path = "empty.rs")]
-#[cfg_attr(usdt_backend_linker, path = "linker.rs")]
-#[cfg_attr(usdt_backend_standard, path = "no-linker.rs")]
-#[cfg_attr(usdt_backend_stapsdt, path = "stapsdt.rs")]
-mod internal;
-
-// Since the `empty` is mostly a no-op, parts of the common code will go unused when it is
-// selected for use.
-#[cfg_attr(usdt_backend_noop, allow(dead_code))]
 mod common;
+mod empty;
+mod linker;
+#[path = "no-linker.rs"]
+mod no_linker;
+mod probe_record;
+mod stapsdt;
+mod target;
+
+pub use target::{dispatch, Target, TargetConfig};
+
+#[cfg(usdt_backend_noop)]
+use empty as internal;
+#[cfg(usdt_backend_linker)]
+use linker as internal;
+#[cfg(usdt_backend_standard)]
+use no_linker as internal;
+#[cfg(usdt_backend_stapsdt)]
+use stapsdt as internal;
 
 /// Register an application's probe points with DTrace.
 ///
@@ -80,6 +89,22 @@ pub struct CompileProvidersConfig {
 }
 
 impl CompileProvidersConfig {
+    /// Serialize the public options into the deferred internal invocation.
+    pub fn to_tokens(&self) -> proc_macro2::TokenStream {
+        let provider = self
+            .provider
+            .iter()
+            .map(|value| quote::quote! { provider = #value, });
+        let probe_format = self
+            .probe_format
+            .iter()
+            .map(|value| quote::quote! { probe_format = #value, });
+        let module = self
+            .module
+            .iter()
+            .map(|value| quote::quote! { module = #value, });
+        quote::quote! { #(#provider)* #(#probe_format)* #(#module)* }
+    }
     /// Return the formatted name of a probe.
     pub fn format_probe(&self, probe_name: &str) -> String {
         if let Some(fmt) = &self.probe_format {
@@ -122,17 +147,77 @@ pub fn compile_provider_source(
     source: &str,
     config: &CompileProvidersConfig,
 ) -> Result<proc_macro2::TokenStream, Error> {
-    crate::internal::compile_provider_source(source, config)
+    // Keep parse errors in Builder::build, but defer backend work until the
+    // generated file is included in the consuming compilation.
+    let _ = dtrace_parser::File::try_from(source)?;
+    let config = config.to_tokens();
+    Ok(dispatch(|target| {
+        quote::quote! {
+            ::usdt::__dtrace_provider!(#source, target = #target, config = { #config });
+        }
+    }))
 }
 
 // Compile a DTrace provider from its representation in the USDT crate.
 pub fn compile_provider(
     provider: &Provider,
     config: &CompileProvidersConfig,
-) -> proc_macro2::TokenStream {
-    crate::internal::compile_provider_from_definition(provider, config)
+    target: Target,
+) -> Result<proc_macro2::TokenStream, Error> {
+    use target::{Architecture, StandardTarget};
+    let tokens = match target {
+        Target::MacosX86_64 => {
+            return linker::compile_provider_from_definition(provider, config, Architecture::X86_64)
+        }
+        Target::MacosAarch64 => {
+            return linker::compile_provider_from_definition(
+                provider,
+                config,
+                Architecture::Aarch64,
+            )
+        }
+        Target::LinuxX86_64 => {
+            stapsdt::compile_provider_from_definition(provider, config, Architecture::X86_64)
+        }
+        Target::LinuxAarch64 => {
+            stapsdt::compile_provider_from_definition(provider, config, Architecture::Aarch64)
+        }
+        Target::IllumosX86_64 => {
+            no_linker::compile_provider_from_definition(provider, config, StandardTarget::Illumos)
+        }
+        Target::SolarisX86_64 => {
+            no_linker::compile_provider_from_definition(provider, config, StandardTarget::Solaris)
+        }
+        Target::FreebsdX86_64 => {
+            no_linker::compile_provider_from_definition(provider, config, StandardTarget::Freebsd)
+        }
+        Target::Noop => empty::compile_provider_from_definition(provider, config),
+    };
+    Ok(tokens)
 }
 
+/// Compile D source using the target selected by the consuming crate.
+pub fn compile_provider_source_for_target(
+    source: &str,
+    config: &CompileProvidersConfig,
+    target: Target,
+) -> Result<proc_macro2::TokenStream, Error> {
+    let file = dtrace_parser::File::try_from(source)?;
+    let providers = file
+        .providers()
+        .iter()
+        .map(|provider| {
+            let provider = Provider::from(provider);
+            let config = CompileProvidersConfig {
+                provider: Some(provider.name.clone()),
+                probe_format: config.probe_format.clone(),
+                module: Some(config.module.as_ref().unwrap_or(&provider.name).clone()),
+            };
+            compile_provider(&provider, &config, target)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(quote::quote! { #(#providers)* })
+}
 /// A data type supported by the `usdt` crate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataType {
@@ -141,11 +226,34 @@ pub enum DataType {
     Serializable(Box<syn::Type>),
 }
 
+// All instrumented targets admitted by dispatch have a 64-bit ABI. Resolve
+// pointer-sized C types here; dtrace-parser's convenience conversions use the
+// host width. Rust argument types remain usize/isize for consumer type checks.
+fn native_abi_type(ty: dtrace_parser::DataType) -> dtrace_parser::DataType {
+    use dtrace_parser::{BitWidth, DataType, Integer};
+    match ty {
+        DataType::Integer(Integer {
+            sign,
+            width: BitWidth::Pointer,
+        }) => DataType::Integer(Integer {
+            sign,
+            width: BitWidth::Bit64,
+        }),
+        DataType::Pointer(Integer {
+            sign,
+            width: BitWidth::Pointer,
+        }) => DataType::Pointer(Integer {
+            sign,
+            width: BitWidth::Bit64,
+        }),
+        other => other,
+    }
+}
 impl DataType {
     /// Convert a data type to its C type representation as a string.
     pub fn to_c_type(&self) -> String {
         match self {
-            DataType::Native(ty) => ty.to_c_type(),
+            DataType::Native(ty) => native_abi_type(*ty).to_c_type(),
             DataType::UniqueId => String::from("uint64_t"),
             DataType::Serializable(_) => String::from("char*"),
         }
@@ -154,7 +262,9 @@ impl DataType {
     /// Return the Rust FFI type representation of this data type.
     pub fn to_rust_ffi_type(&self) -> syn::Type {
         match self {
-            DataType::Native(ty) => syn::parse_str(&ty.to_rust_ffi_type()).unwrap(),
+            DataType::Native(ty) => {
+                syn::parse_str(&native_abi_type(*ty).to_rust_ffi_type()).unwrap()
+            }
             DataType::UniqueId => syn::parse_str("::std::os::raw::c_ulonglong").unwrap(),
             DataType::Serializable(_) => syn::parse_str("*const ::std::os::raw::c_char").unwrap(),
         }
@@ -428,6 +538,29 @@ mod test {
     use dtrace_parser::DataType as DType;
     use dtrace_parser::Integer;
     use dtrace_parser::Sign;
+
+    #[test]
+    fn pointer_sized_types_keep_the_consumer_abi() {
+        let ty = DataType::Native(DType::Integer(Integer {
+            sign: Sign::Signed,
+            width: BitWidth::Pointer,
+        }));
+        assert_eq!(ty.to_c_type(), "int64_t");
+        assert_eq!(
+            ty.to_rust_ffi_type(),
+            syn::parse_str("::std::os::raw::c_longlong").unwrap()
+        );
+        assert_eq!(ty.to_rust_type(), syn::parse_str("isize").unwrap());
+        let pointer = DataType::Native(DType::Pointer(Integer {
+            sign: Sign::Unsigned,
+            width: BitWidth::Pointer,
+        }));
+        assert_eq!(pointer.to_c_type(), "uint64_t*");
+        assert_eq!(
+            pointer.to_rust_type(),
+            syn::parse_str("*const usize").unwrap()
+        );
+    }
 
     #[test]
     fn test_probe_to_d_source() {

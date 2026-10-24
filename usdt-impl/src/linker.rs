@@ -65,65 +65,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::target::Architecture;
 use crate::{common, DataType, Provider};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::{
     collections::BTreeMap,
-    convert::TryFrom,
     env,
     io::Write,
     process::{Command, Stdio},
 };
 
-/// Compile a DTrace provider definition into Rust tokens that implement its probes.
-pub fn compile_provider_source(
-    source: &str,
-    config: &crate::CompileProvidersConfig,
-) -> Result<TokenStream, crate::Error> {
-    let dfile = dtrace_parser::File::try_from(source)?;
-    let header = build_header_from_provider(&source)?;
-    let provider_info = extract_providers(&header);
-    let providers = dfile
-        .providers()
-        .into_iter()
-        .map(|provider| {
-            let provider = Provider::from(provider);
-            // Ensure that the name of the module in the config is set, either by the caller or
-            // defaulting to the provider name.
-            let config = crate::CompileProvidersConfig {
-                provider: Some(provider.name.clone()),
-                probe_format: config.probe_format.clone(),
-                module: match &config.module {
-                    None => Some(provider.name.clone()),
-                    other => other.clone(),
-                },
-            };
-            compile_provider(&provider, &provider_info[&provider.name], &config)
-        })
-        .collect::<Vec<_>>();
-    Ok(quote! {
-        #(#providers)*
-    })
-}
-
 pub fn compile_provider_from_definition(
     provider: &Provider,
     config: &crate::CompileProvidersConfig,
-) -> TokenStream {
-    // Unwrap safety: The type signature confirms that `provider` is valid.
-    let header = build_header_from_provider(&provider.to_d_source()).unwrap();
-    let provider_info = extract_providers(&header);
-    let provider_tokens = compile_provider(provider, &provider_info[&provider.name], config);
-    quote! {
-        #provider_tokens
+    arch: Architecture,
+) -> Result<TokenStream, crate::Error> {
+    let header = build_header_from_provider(&provider.to_d_source())?;
+    let providers = extract_providers(&header);
+    let info = providers
+        .get(&provider.name)
+        .ok_or(crate::Error::DTraceError)?;
+    if info.stability.is_empty()
+        || info.typedefs.is_empty()
+        || provider.probes.iter().any(|probe| {
+            !info.probes.contains_key(&probe.name) || !info.is_enabled.contains_key(&probe.name)
+        })
+    {
+        return Err(crate::Error::DTraceError);
     }
+    Ok(compile_provider(provider, info, config, arch))
 }
 
 fn compile_provider(
     provider: &Provider,
     provider_info: &ProviderInfo,
     config: &crate::CompileProvidersConfig,
+    arch: Architecture,
 ) -> TokenStream {
     let mut probe_impls = Vec::new();
     for probe in provider.probes.iter() {
@@ -133,6 +111,7 @@ fn compile_provider(
             config,
             provider_info,
             &probe.types,
+            arch,
         ));
     }
     let module = config.module_ident();
@@ -149,6 +128,7 @@ fn compile_probe(
     config: &crate::CompileProvidersConfig,
     provider_info: &ProviderInfo,
     types: &[DataType],
+    arch: Architecture,
 ) -> TokenStream {
     // Retrieve the string names and the Rust identifiers used for the extern functions.
     // These are provided by the macOS linker, but have invalid Rust identifier names, like
@@ -170,16 +150,14 @@ fn compile_probe(
         let ty = typ.to_rust_ffi_type();
         syn::parse2::<syn::FnArg>(quote! { _: #ty }).unwrap()
     });
-    let (unpacked_args, in_regs) = common::construct_probe_args(types);
+    let (unpacked_args, in_regs) = common::construct_probe_args(types, arch);
     let type_check_fn =
         common::construct_type_check(&provider.name, probe_name, &provider.use_statements, types);
 
-    #[cfg(target_arch = "x86_64")]
-    let call_instruction = quote! { "call {extern_probe_fn}" };
-    #[cfg(target_arch = "aarch64")]
-    let call_instruction = quote! { "bl {extern_probe_fn}" };
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    compile_error!("USDT only supports x86_64 and AArch64 architectures");
+    let call_instruction = match arch {
+        Architecture::X86_64 => quote! { "call {extern_probe_fn}" },
+        Architecture::Aarch64 => quote! { "bl {extern_probe_fn}" },
+    };
 
     let impl_block = quote! {
         unsafe extern "C" {
@@ -342,9 +320,13 @@ fn build_header_from_provider(source: &str) -> Result<String, crate::Error> {
             .map_err(|_| crate::Error::DTraceError)?;
     }
     let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(crate::Error::DTraceError);
+    }
     String::from_utf8(output.stdout).map_err(|_| crate::Error::DTraceError)
 }
 
+#[cfg(usdt_backend_linker)]
 pub fn register_probes() -> Result<(), crate::Error> {
     // This function is a NOP, since we're using Apple's linker to create the DOF and call ioctl(2)
     // to send it to the driver.
@@ -437,6 +419,7 @@ mod tests {
             },
             &provider_info,
             &types,
+            Architecture::X86_64,
         );
 
         let output = tokens.to_string();
@@ -456,10 +439,7 @@ mod tests {
 
         let needles = &[
             "asm ! (\".reference {typedefs}\"",
-            #[cfg(target_arch = "x86_64")]
             "call {extern_probe_fn}",
-            #[cfg(target_arch = "aarch64")]
-            "bl {extern_probe_fn}",
             "\".reference {stability}",
             "typedefs = sym typedefs",
             &format!(

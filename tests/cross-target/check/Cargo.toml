@@ -1,0 +1,8 @@
+[package]
+name = "cross-target-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+goblin = { version = "0.10", features = ["elf64", "mach64", "archive"] }

@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::target::Architecture;
 use crate::DataType;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -103,16 +104,14 @@ fn shared_slice_elem_type(reference: &syn::TypeReference) -> Option<&syn::Type> 
 
 // Return code to destructure a probe arguments into identifiers, and to pass those to ASM
 // registers.
-pub fn construct_probe_args(types: &[DataType]) -> (TokenStream, TokenStream) {
+pub fn construct_probe_args(types: &[DataType], arch: Architecture) -> (TokenStream, TokenStream) {
     // x86_64 passes the first 6 arguments in registers, with the rest on the stack.
     // We limit this to 6 arguments in all cases for now, as handling those stack
     // arguments would be challenging with the current `asm!` macro implementation.
-    #[cfg(target_arch = "x86_64")]
-    let abi_regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
-    #[cfg(target_arch = "aarch64")]
-    let abi_regs = ["x0", "x1", "x2", "x3", "x4", "x5"];
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    compile_error!("USDT only supports x86_64 and ARM64 architectures");
+    let abi_regs = match arch {
+        Architecture::X86_64 => ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+        Architecture::Aarch64 => ["x0", "x1", "x2", "x3", "x4", "x5"],
+    };
 
     assert!(
         types.len() <= abi_regs.len(),
@@ -344,31 +343,31 @@ mod tests {
             })),
             DataType::Native(dtrace_parser::DataType::String),
         ];
-        #[cfg(target_arch = "x86_64")]
-        let registers = ["rdi", "rsi"];
-        #[cfg(target_arch = "aarch64")]
-        let registers = ["x0", "x1"];
-        let (args, regs) = construct_probe_args(types);
         let expected = quote! {
             let args = ($args_lambda)();
             let arg_0 = (*<_ as ::std::borrow::Borrow<*const u8>>::borrow(&args.0) as usize);
             let arg_1 = [(args.1.as_ref() as &str).as_bytes(), &[0_u8]].concat();
         };
-        assert_eq!(args.to_string(), expected.to_string());
-
-        for (i, (expected, actual)) in registers
-            .iter()
-            .zip(regs.to_string().split(','))
-            .enumerate()
-        {
-            let reg = actual.replace(' ', "");
-            let expected = format!("in(\"{}\")(arg_{}", expected, i);
-            assert!(
-                reg.starts_with(&expected),
-                "reg: {}; expected {}",
-                reg,
-                expected,
-            );
+        for (arch, registers) in [
+            (Architecture::X86_64, ["rdi", "rsi"]),
+            (Architecture::Aarch64, ["x0", "x1"]),
+        ] {
+            let (args, regs) = construct_probe_args(types, arch);
+            assert_eq!(args.to_string(), expected.to_string());
+            for (i, (expected, actual)) in registers
+                .iter()
+                .zip(regs.to_string().split(','))
+                .enumerate()
+            {
+                let reg = actual.replace(' ', "");
+                let expected = format!("in(\"{}\")(arg_{}", expected, i);
+                assert!(
+                    reg.starts_with(&expected),
+                    "reg: {}; expected {}",
+                    reg,
+                    expected
+                );
+            }
         }
     }
 

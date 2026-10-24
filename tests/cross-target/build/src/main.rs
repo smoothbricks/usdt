@@ -1,0 +1,27 @@
+//! Fire the build-script-generated probes once, with the probes disabled,
+//! and verify that their argument closures were not evaluated.
+
+// Copyright 2026 Oxide Computer Company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+fn main() {
+    usdt::register_probes().expect("failed to register probes");
+    cross_target_build::fire_probes();
+    let evaluated = cross_target_build::arguments_evaluated();
+    assert_eq!(
+        evaluated, 0,
+        "arguments of disabled probes were evaluated {evaluated} time(s)",
+    );
+    println!("disabled probe arguments were not evaluated");
+}

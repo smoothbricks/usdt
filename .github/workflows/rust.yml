@@ -183,3 +183,62 @@ jobs:
           --exclude test-unique-id
           --exclude dusty
           --no-fail-fast
+
+  cross-target-test:
+    name: Cross-target probe generation (ARM64 macOS host, x86-64 Linux target)
+    # macos-15 is an Apple-silicon runner: host architecture and OS both
+    # differ from the x86_64-unknown-linux-gnu target, which is the point.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-linux-gnu
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+      - run: cargo install --locked --version 0.23.4 cargo-zigbuild
+      - run: test "$(uname -m)" = arm64
+      # Native: build the consumers and the object checker, prove disabled
+      # probe arguments are not evaluated, and prove the Mach-O objects
+      # carry dtrace probe symbols (so laziness cannot pass as a no-op).
+      - run: >
+          cargo build
+          --package cross-target-attr
+          --package cross-target-macro
+          --package cross-target-build
+          --package cross-target-plain
+          --package cross-target-check
+      - run: >
+          cargo test
+          --package cross-target-attr
+          --package cross-target-macro
+          --package cross-target-build
+          --package cross-target-check
+      - run: |
+          ./target/debug/cross-target-check --mach-o target/debug/libcross_target_attr.rlib crossattr:work crossattr:done
+          ./target/debug/cross-target-check --mach-o target/debug/libcross_target_macro.rlib crossmacro:work crossmacro:done
+          ./target/debug/cross-target-check --mach-o target/debug/libcross_target_build.rlib crossbuild:work crossbuild:done
+          ./target/debug/cross-target-check --none target/debug/libcross_target_plain.rlib
+      # Cross: libraries need no final target linker, but transitive psm assembly still needs a target C compiler.
+      - run: >
+          cargo zigbuild
+          --target x86_64-unknown-linux-gnu
+          --lib
+          --package cross-target-attr
+          --package cross-target-macro
+          --package cross-target-build
+          --package cross-target-plain
+      - run: |
+          ./target/debug/cross-target-check --stapsdt target/x86_64-unknown-linux-gnu/debug/libcross_target_attr.rlib 'crossattr:work=1@%dil 8@%rsi 4@%edx -4@%ecx' 'crossattr:done='
+          ./target/debug/cross-target-check --stapsdt target/x86_64-unknown-linux-gnu/debug/libcross_target_macro.rlib 'crossmacro:work=1@%dil 8@%rsi 8@%rdx -4@%ecx' 'crossmacro:done='
+          ./target/debug/cross-target-check --stapsdt target/x86_64-unknown-linux-gnu/debug/libcross_target_build.rlib 'crossbuild:work=1@%dil 8@%rsi 8@%rdx -4@%ecx' 'crossbuild:done='
+          ./target/debug/cross-target-check --none target/x86_64-unknown-linux-gnu/debug/libcross_target_plain.rlib
+      # Oracle sensitivity: demanding instrumented records from the
+      # uninstrumented consumer must fail.
+      - run: |
+          if ./target/debug/cross-target-check --stapsdt target/x86_64-unknown-linux-gnu/debug/libcross_target_plain.rlib 'crossattr:work=1@%dil 8@%rsi 4@%edx -4@%ecx'; then
+            echo "checker accepted an uninstrumented object as instrumented" >&2
+            exit 1
+          fi

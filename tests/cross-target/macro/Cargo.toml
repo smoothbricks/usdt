@@ -1,0 +1,8 @@
+[package]
+name = "cross-target-macro"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+usdt = { path = "../../../usdt" }

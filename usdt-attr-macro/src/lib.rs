@@ -20,37 +20,49 @@ use serde_tokenstream::from_tokenstream;
 use syn::spanned::Spanned;
 use usdt_impl::{CompileProvidersConfig, DataType, Probe, Provider};
 
-/// Generate a provider from functions defined in a Rust module.
 #[proc_macro_attribute]
 pub fn provider(
     attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let attr = TokenStream::from(attr);
-    match from_tokenstream::<CompileProvidersConfig>(&attr) {
-        Ok(config) => {
-            // Renaming the module via the attribute macro isn't supported.
-            if config.module.is_some() {
-                syn::Error::new(
-                    attr.span(),
-                    "The provider module may not be renamed via the attribute macro",
-                )
-                .to_compile_error()
-                .into()
-            } else {
-                generate_provider_item(TokenStream::from(item), config)
-                    .unwrap_or_else(|e| e.to_compile_error())
-                    .into()
-            }
+    let item = TokenStream::from(item);
+    usdt_impl::dispatch(|target| {
+        quote! {
+            #[::usdt::__provider(target = #target, config = { #attr })]
+            #item
         }
-        Err(e) => e.to_compile_error().into(),
-    }
+    })
+    .into()
 }
 
+/// Implementation entry point selected by cfg in the consuming crate.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn __provider(
+    attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let attr = TokenStream::from(attr);
+    let result = from_tokenstream::<usdt_impl::TargetConfig>(&attr).and_then(|options| {
+        if options.config.module.is_some() {
+            Err(syn::Error::new(
+                attr.span(),
+                "The provider module may not be renamed via the attribute macro",
+            ))
+        } else {
+            generate_provider_item(TokenStream::from(item), options.config, options.target)
+        }
+    });
+    result
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
 // Generate the actual provider implementation, include the type-checks and probe macros.
 fn generate_provider_item(
     item: TokenStream,
     mut config: CompileProvidersConfig,
+    target: usdt_impl::Target,
 ) -> Result<TokenStream, syn::Error> {
     let mod_ = syn::parse2::<syn::ItemMod>(item)?;
     if mod_.ident == "provider" {
@@ -137,7 +149,8 @@ fn generate_provider_item(
         probes,
         use_statements: use_statements.clone(),
     };
-    let compiled = usdt_impl::compile_provider(&provider, &config);
+    let compiled = usdt_impl::compile_provider(&provider, &config, target)
+        .map_err(|error| syn::Error::new(mod_.span(), error.to_string()))?;
     let type_checks = if check_fns.is_empty() {
         quote! { const _: fn() = || {}; }
     } else {
@@ -424,6 +437,29 @@ mod tests {
     use dtrace_parser::Integer;
     use dtrace_parser::Sign;
     use rstest::rstest;
+
+    #[test]
+    fn target_dispatch_options_round_trip() {
+        let config = CompileProvidersConfig {
+            provider: Some(String::from("provider_name")),
+            probe_format: Some(String::from("prefix_{probe}")),
+            module: Some(String::from("module_name")),
+        };
+        let options = config.to_tokens();
+        let mut targets = 0;
+        let _ = usdt_impl::dispatch(|target| {
+            let parsed = from_tokenstream::<usdt_impl::TargetConfig>(&quote! {
+                target = #target, config = { #options }
+            })
+            .unwrap();
+            assert_eq!(parsed.config.provider, config.provider);
+            assert_eq!(parsed.config.probe_format, config.probe_format);
+            assert_eq!(parsed.config.module, config.module);
+            targets += 1;
+            quote! {}
+        });
+        assert_eq!(targets, 8);
+    }
 
     #[test]
     fn test_is_simple_type() {

@@ -166,6 +166,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "cross-target-attr"
+version = "0.0.0"
+dependencies = [
+ "usdt",
+]
+
+[[package]]
+name = "cross-target-build"
+version = "0.0.0"
+dependencies = [
+ "usdt",
+]
+
+[[package]]
+name = "cross-target-check"
+version = "0.0.0"
+dependencies = [
+ "goblin",
+]
+
+[[package]]
+name = "cross-target-macro"
+version = "0.0.0"
+dependencies = [
+ "usdt",
+]
+
+[[package]]
+name = "cross-target-plain"
+version = "0.0.0"
+
+[[package]]
 name = "does-it-work"
 version = "0.0.0"
 dependencies = [

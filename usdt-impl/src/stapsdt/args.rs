@@ -14,117 +14,39 @@
 
 //! Helpers for generating GNU Assembler format for use in STAPSDT probes.
 
+use crate::target::Architecture;
 use crate::DataType;
 use dtrace_parser::{BitWidth, DataType as NativeDataType, Integer, Sign};
 
-/// Convert an Integer type and a register index into a GNU Assembler operation
-/// that reads the integer's value from the correct register. Effectively this
-/// means generating a string like `%REG` where `REG` is the register that the
-/// data is located in.
-fn integer_to_asm_op(integer: &Integer, reg_index: u8) -> &'static str {
-    // See common.rs for note on argument passing and maximum supported
-    // argument count.
+// Dispatch admits only 64-bit targets. Pointer-sized integers and addresses
+// therefore have the target width, regardless of the generator's host width.
+fn integer_to_asm_op(integer: &Integer, reg_index: usize, arch: Architecture) -> &'static str {
     assert!(
-        reg_index <= 5,
+        reg_index < 6,
         "Up to 6 probe arguments are currently supported"
     );
-    if cfg!(target_arch = "x86_64") {
-        match (integer.width, reg_index) {
-            (BitWidth::Bit8, 0) => "%dil",
-            (BitWidth::Bit16, 0) => "%di",
-            (BitWidth::Bit32, 0) => "%edi",
-            (BitWidth::Bit64, 0) => "%rdi",
-            (BitWidth::Bit8, 1) => "%sil",
-            (BitWidth::Bit16, 1) => "%si",
-            (BitWidth::Bit32, 1) => "%esi",
-            (BitWidth::Bit64, 1) => "%rsi",
-            (BitWidth::Bit8, 2) => "%dl",
-            (BitWidth::Bit16, 2) => "%dx",
-            (BitWidth::Bit32, 2) => "%edx",
-            (BitWidth::Bit64, 2) => "%rdx",
-            (BitWidth::Bit8, 3) => "%cl",
-            (BitWidth::Bit16, 3) => "%cx",
-            (BitWidth::Bit32, 3) => "%ecx",
-            (BitWidth::Bit64, 3) => "%rcx",
-            (BitWidth::Bit8, 4) => "%r8b",
-            (BitWidth::Bit16, 4) => "%r8w",
-            (BitWidth::Bit32, 4) => "%r8d",
-            (BitWidth::Bit64, 4) => "%r8",
-            (BitWidth::Bit8, 5) => "%r9b",
-            (BitWidth::Bit16, 5) => "%r9w",
-            (BitWidth::Bit32, 5) => "%r9d",
-            (BitWidth::Bit64, 5) => "%r9",
-            #[cfg(target_pointer_width = "32")]
-            (BitWidth::Pointer, 0) => "%edi",
-            #[cfg(target_pointer_width = "64")]
-            (BitWidth::Pointer, 0) => "%rdi",
-            #[cfg(target_pointer_width = "32")]
-            (BitWidth::Pointer, 1) => "%esi",
-            #[cfg(target_pointer_width = "64")]
-            (BitWidth::Pointer, 1) => "%rsi",
-            #[cfg(target_pointer_width = "32")]
-            (BitWidth::Pointer, 2) => "%edx",
-            #[cfg(target_pointer_width = "64")]
-            (BitWidth::Pointer, 2) => "%rdx",
-            #[cfg(target_pointer_width = "32")]
-            (BitWidth::Pointer, 3) => "%ecx",
-            #[cfg(target_pointer_width = "64")]
-            (BitWidth::Pointer, 3) => "%rcx",
-            #[cfg(target_pointer_width = "32")]
-            (BitWidth::Pointer, 4) => "%e8",
-            #[cfg(target_pointer_width = "64")]
-            (BitWidth::Pointer, 4) => "%r8",
-            #[cfg(target_pointer_width = "32")]
-            (BitWidth::Pointer, 5) => "%e9",
-            #[cfg(target_pointer_width = "64")]
-            (BitWidth::Pointer, 5) => "%r9",
-            #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
-            (BitWidth::Pointer, _) => compile_error!("Unsupported pointer width"),
-            _ => unreachable!(),
-        }
-    } else if cfg!(target_arch = "aarch64") {
-        // GNU Assembly syntax for SystemTap only uses the extended register
-        // for some reason.
-        match reg_index {
-            0 => "x0",
-            1 => "x1",
-            2 => "x2",
-            3 => "x3",
-            4 => "x4",
-            5 => "x5",
-            _ => unreachable!(),
-        }
-    } else {
-        unreachable!("Unsupported Linux target architecture")
-    }
+    let registers = match arch {
+        Architecture::X86_64 => match integer.width {
+            BitWidth::Bit8 => ["%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"],
+            BitWidth::Bit16 => ["%di", "%si", "%dx", "%cx", "%r8w", "%r9w"],
+            BitWidth::Bit32 => ["%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"],
+            BitWidth::Bit64 | BitWidth::Pointer => ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"],
+        },
+        Architecture::Aarch64 => ["x0", "x1", "x2", "x3", "x4", "x5"],
+    };
+    registers[reg_index]
 }
 
-/// Convert an Integer type into its STAPSDT probe arguments definition
-/// signedness and size value as a String.
 fn integer_to_arg_size(integer: &Integer) -> &'static str {
-    match integer.width {
-        BitWidth::Bit8 => match integer.sign {
-            Sign::Unsigned => "1",
-            _ => "-1",
-        },
-        BitWidth::Bit16 => match integer.sign {
-            Sign::Unsigned => "2",
-            _ => "-2",
-        },
-        BitWidth::Bit32 => match integer.sign {
-            Sign::Unsigned => "4",
-            _ => "-4",
-        },
-        BitWidth::Bit64 => match integer.sign {
-            Sign::Unsigned => "8",
-            _ => "-8",
-        },
-        #[cfg(target_pointer_width = "32")]
-        BitWidth::Pointer => "4",
-        #[cfg(target_pointer_width = "64")]
-        BitWidth::Pointer => "8",
-        #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
-        BitWidth::Pointer => compile_error!("Unsupported pointer width"),
+    match (integer.width, integer.sign) {
+        (BitWidth::Bit8, Sign::Unsigned) => "1",
+        (BitWidth::Bit8, _) => "-1",
+        (BitWidth::Bit16, Sign::Unsigned) => "2",
+        (BitWidth::Bit16, _) => "-2",
+        (BitWidth::Bit32, Sign::Unsigned) => "4",
+        (BitWidth::Bit32, _) => "-4",
+        (BitWidth::Bit64 | BitWidth::Pointer, Sign::Unsigned) => "8",
+        (BitWidth::Bit64 | BitWidth::Pointer, _) => "-8",
     }
 }
 
@@ -132,78 +54,54 @@ const POINTER: Integer = Integer {
     sign: Sign::Unsigned,
     width: BitWidth::Pointer,
 };
-
 const UNIQUE_ID: Integer = Integer {
     sign: Sign::Unsigned,
     width: BitWidth::Bit64,
 };
 
-/// Convert a type and register index to its GNU Assembler operation as a
-/// String.
-fn native_data_type_to_asm_op(typ: &NativeDataType, reg_index: u8) -> String {
-    match typ {
-        NativeDataType::Integer(int) => integer_to_asm_op(int, reg_index).into(),
-        // Integer pointers are dereferenced by wrapping the pointer assembly
-        // into parentheses.
-        NativeDataType::Pointer(_) => format!("({})", integer_to_asm_op(&POINTER, reg_index)),
-        NativeDataType::String => integer_to_asm_op(&POINTER, reg_index).into(),
+/// Format N@OP, where N is the signed byte width and OP the GNU assembler
+/// operand, using the consuming target's ABI.
+/// See https://sourceware.org/systemtap/wiki/UserSpaceProbeImplementation
+pub(crate) fn format_argument((reg_index, typ): (usize, &DataType), arch: Architecture) -> String {
+    let (integer, dereference) = match typ {
+        DataType::Native(NativeDataType::Integer(integer)) => (integer, false),
+        DataType::Native(NativeDataType::Pointer(_)) => (&POINTER, true),
+        DataType::Native(NativeDataType::String) | DataType::Serializable(_) => (&POINTER, false),
+        DataType::UniqueId => (&UNIQUE_ID, false),
+    };
+    let size = integer_to_arg_size(integer);
+    let operand = integer_to_asm_op(integer, reg_index, arch);
+    if dereference {
+        format!("{}@({})", size, operand)
+    } else {
+        format!("{}@{}", size, operand)
     }
 }
 
-/// Convert a type to its GNU Assembler size representation as a string.
-fn native_data_type_to_arg_size(typ: &NativeDataType) -> &'static str {
-    match typ {
-        NativeDataType::Integer(int) => integer_to_arg_size(int),
-        NativeDataType::Pointer(_) | NativeDataType::String => integer_to_arg_size(&POINTER),
-        // Note: If NativeDataType::Float becomes supported, it will need an
-        // "f" suffix in the type, eg. `4f` or `8f`.
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Convert a DataType and register index to its GNU Assembler operation as a
-/// String.
-fn data_type_to_asm_op(typ: &DataType, reg_index: u8) -> String {
-    match typ {
-        DataType::Native(ty) => native_data_type_to_asm_op(ty, reg_index),
-        DataType::UniqueId => integer_to_asm_op(&UNIQUE_ID, reg_index).into(),
-        DataType::Serializable(_) => integer_to_asm_op(&POINTER, reg_index).into(),
+    #[test]
+    fn formats_both_target_abis_on_any_host() {
+        for (width, sign, x86, arm) in [
+            (BitWidth::Bit8, Sign::Unsigned, "1@%dil", "1@x0"),
+            (BitWidth::Bit16, Sign::Signed, "-2@%di", "-2@x0"),
+            (BitWidth::Bit32, Sign::Signed, "-4@%edi", "-4@x0"),
+            (BitWidth::Bit64, Sign::Unsigned, "8@%rdi", "8@x0"),
+            (BitWidth::Pointer, Sign::Signed, "-8@%rdi", "-8@x0"),
+        ] {
+            let typ = DataType::Native(NativeDataType::Integer(Integer { sign, width }));
+            assert_eq!(format_argument((0, &typ), Architecture::X86_64), x86);
+            assert_eq!(format_argument((0, &typ), Architecture::Aarch64), arm);
+        }
+        assert_eq!(
+            format_argument((5, &DataType::UniqueId), Architecture::X86_64),
+            "8@%r9"
+        );
+        assert_eq!(
+            format_argument((5, &DataType::UniqueId), Architecture::Aarch64),
+            "8@x5"
+        );
     }
-}
-
-/// Convert a DataType to its STAPSDT probe argument size representation as a
-/// String.
-fn data_type_to_arg_size(typ: &DataType) -> &'static str {
-    match typ {
-        DataType::Native(ty) => native_data_type_to_arg_size(ty),
-        DataType::UniqueId => integer_to_arg_size(&UNIQUE_ID),
-        DataType::Serializable(_) => integer_to_arg_size(&POINTER),
-    }
-}
-
-/// ## Format a STAPSDT probe argument into the SystemTap argument format.
-/// Source: https://sourceware.org/systemtap/wiki/UserSpaceProbeImplementation
-///
-/// ### Summary
-///
-/// Argument format is `Nf@OP`, N is an optional `-` to signal signedness
-/// followed by one of `{1,2,4,8}` for bit width, `f` is an optional marker
-/// for floating point values, @ is a separator, and OP is the
-/// "actual assembly operand". The assembly operand is given in the GNU
-/// Assembler format. See
-/// https://en.wikibooks.org/wiki/X86_Assembly/GNU_assembly_syntax
-/// for details.
-///
-/// ### Examples
-///
-/// 1. Read a u64 from RDI: `8@%rdi`.
-/// 2. Read an i32 through a pointer in RSI: `-4@(%rsi)`.
-/// 3. Read an f64 through a pointer in RDI: `8f@(%rdi)`.
-///    (Not sure if `-` should be added.)
-/// 4. Read a u64 through a pointer with an offset: `8%-4(%rdi)`.
-pub(crate) fn format_argument((reg_index, typ): (usize, &DataType)) -> String {
-    format!(
-        "{}@{}",
-        data_type_to_arg_size(typ),
-        data_type_to_asm_op(typ, u8::try_from(reg_index).unwrap())
-    )
 }

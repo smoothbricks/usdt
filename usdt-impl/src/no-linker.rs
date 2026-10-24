@@ -14,74 +14,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::convert::TryFrom;
+#[cfg(usdt_backend_standard)]
 use std::fs::OpenOptions;
+#[cfg(usdt_backend_standard)]
 use std::os::unix::io::AsRawFd;
 
-use crate::record::{emit_probe_record, process_section};
+use crate::probe_record::emit_probe_record;
+#[cfg(usdt_backend_standard)]
+use crate::record::process_section;
+use crate::target::{Architecture, StandardTarget};
 use crate::{common, Probe, Provider};
+#[cfg(usdt_backend_standard)]
 use dof::{serialize_section, Section};
 use proc_macro2::TokenStream;
 use quote::quote;
 
-/// Compile a DTrace provider definition into Rust tokens that implement its probes.
-pub fn compile_provider_source(
-    source: &str,
-    config: &crate::CompileProvidersConfig,
-) -> Result<TokenStream, crate::Error> {
-    let dfile = dtrace_parser::File::try_from(source)?;
-    let providers = dfile
-        .providers()
-        .iter()
-        .map(|provider| {
-            let provider = Provider::from(provider);
-            // Ensure that the name of the module in the config is set, either by the caller or
-            // defaulting to the provider name.
-            let config = crate::CompileProvidersConfig {
-                provider: Some(provider.name.clone()),
-                probe_format: config.probe_format.clone(),
-                module: match &config.module {
-                    None => Some(provider.name.clone()),
-                    other => other.clone(),
-                },
-            };
-            compile_provider(&provider, &config)
-        })
-        .collect::<Vec<_>>();
-    Ok(quote! {
-        #(#providers)*
-    })
-}
-
 pub fn compile_provider_from_definition(
     provider: &Provider,
     config: &crate::CompileProvidersConfig,
+    target: StandardTarget,
 ) -> TokenStream {
-    compile_provider(provider, config)
-}
-
-fn compile_provider(provider: &Provider, config: &crate::CompileProvidersConfig) -> TokenStream {
     let probe_impls = provider
         .probes
         .iter()
-        .map(|probe| compile_probe(provider, probe, config))
-        .collect::<Vec<_>>();
+        .map(|probe| compile_probe(provider, probe, config, target));
     let module = config.module_ident();
-    quote! {
-        pub(crate) mod #module {
-            #(#probe_impls)*
-        }
-    }
+    quote! { pub(crate) mod #module { #(#probe_impls)* } }
 }
 
 fn compile_probe(
     provider: &Provider,
     probe: &Probe,
     config: &crate::CompileProvidersConfig,
+    target: StandardTarget,
 ) -> TokenStream {
-    let (unpacked_args, in_regs) = common::construct_probe_args(&probe.types);
-    let is_enabled_rec = emit_probe_record(&provider.name, &probe.name, None);
-    let probe_rec = emit_probe_record(&provider.name, &probe.name, Some(&probe.types));
+    let (unpacked_args, in_regs) = common::construct_probe_args(&probe.types, Architecture::X86_64);
+    let is_enabled_rec = emit_probe_record(&provider.name, &probe.name, None, target);
+    let probe_rec = emit_probe_record(&provider.name, &probe.name, Some(&probe.types), target);
     let type_check_fn = common::construct_type_check(
         &provider.name,
         &probe.name,
@@ -118,6 +87,7 @@ fn compile_probe(
     common::build_probe_macro(config, &probe.name, &probe.types, impl_block)
 }
 
+#[cfg(usdt_backend_standard)]
 fn extract_probe_records_from_section() -> Result<Section, crate::Error> {
     unsafe extern "C" {
         #[link_name = "__start_set_dtrace_probes"]
@@ -146,6 +116,7 @@ fn extract_probe_records_from_section() -> Result<Section, crate::Error> {
     process_section(data, /* register = */ true)
 }
 
+#[cfg(usdt_backend_standard)]
 pub fn register_probes() -> Result<(), crate::Error> {
     let section = extract_probe_records_from_section()?;
     let module_name = section
@@ -168,6 +139,7 @@ pub fn register_probes() -> Result<(), crate::Error> {
     ioctl_section(&serialize_section(&section), modname)
 }
 
+#[cfg(usdt_backend_standard)]
 fn ioctl_section(buf: &[u8], modname: [std::os::raw::c_char; 64]) -> Result<(), crate::Error> {
     let helper = dof::dof_bindings::dof_helper {
         dofhp_mod: modname,
@@ -179,7 +151,7 @@ fn ioctl_section(buf: &[u8], modname: [std::os::raw::c_char; 64]) -> Result<(), 
         dofhp_gen: 0,
     };
     let data = &helper as *const _;
-    #[cfg(target_os = "illumos")]
+    #[cfg(any(target_os = "illumos", target_os = "solaris"))]
     let cmd: i32 = 0x64746803;
     #[cfg(target_os = "freebsd")]
     let cmd: u64 = 0xc0587a03;

@@ -1,0 +1,66 @@
+//! Consumer fixture defining probes from a D source file with the
+//! dtrace_provider procedural macro.
+//!
+//! The fixture is compiled for the build host, where firing the (disabled)
+//! probes must not evaluate their argument closures, and for a target other
+//! than the host, where the compiled objects must carry probe metadata for
+//! the target: provider and probe identity plus the target argument ABI. See
+//! the README one directory up for the exact proof commands.
+
+// Copyright 2026 Oxide Computer Company
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use usdt::dtrace_provider;
+
+// The probe argument types are chosen so that each argument has a distinct
+// width and signedness, and therefore a distinct target argument register.
+dtrace_provider!("cross.d");
+
+/// Number of times a probe-argument closure in this crate has been evaluated.
+static ARGUMENTS_EVALUATED: AtomicUsize = AtomicUsize::new(0);
+
+/// Return how many times a probe-argument closure has been evaluated.
+pub fn arguments_evaluated() -> usize {
+    ARGUMENTS_EVALUATED.load(Ordering::SeqCst)
+}
+
+/// Fire each probe once, with argument closures that record their own
+/// evaluation. The probes are disabled (no tracer is attached), so a correct
+/// implementation never evaluates the closures.
+#[inline(never)]
+pub fn fire_probes() {
+    crossmacro::work!(|| {
+        let _ = ARGUMENTS_EVALUATED.fetch_add(1, Ordering::SeqCst);
+        (7u8, 8u64, "nine", -10i32)
+    });
+    crossmacro::done!(|| {
+        let _ = ARGUMENTS_EVALUATED.fetch_add(1, Ordering::SeqCst);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn disabled_probe_arguments_are_not_evaluated() {
+        assert_eq!(super::arguments_evaluated(), 0);
+        super::fire_probes();
+        assert_eq!(
+            super::arguments_evaluated(),
+            0,
+            "arguments of disabled probes were evaluated",
+        );
+    }
+}

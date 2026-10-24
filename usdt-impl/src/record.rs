@@ -15,7 +15,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::DataType;
 use byteorder::{NativeEndian, ReadBytesExt};
 use dof::{Probe, Provider, Section};
 use std::collections::BTreeMap;
@@ -23,11 +22,9 @@ use std::mem::size_of;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 
-// Version number for probe records containing data about all probes.
-//
-// NOTE: This must have a maximum of `u8::MAX - 1`. See `read_record_version` for
-// details.
-pub(crate) const PROBE_REC_VERSION: u8 = 1;
+#[cfg(test)]
+use crate::probe_record::emit_probe_record;
+use crate::probe_record::PROBE_REC_VERSION;
 
 /// Extract records for all defined probes from our custom linker sections.
 pub fn process_section(mut data: &mut [u8], register: bool) -> Result<Section, crate::Error> {
@@ -257,62 +254,6 @@ impl<'a> ReadCstrExt<'a> for &'a [u8] {
     }
 }
 
-// Construct the ASM record for a probe. If `types` is `None`, then is is an is-enabled probe.
-#[allow(dead_code)]
-pub(crate) fn emit_probe_record(prov: &str, probe: &str, types: Option<&[DataType]>) -> String {
-    #[cfg(not(target_os = "freebsd"))]
-    let section_ident = r#"set_dtrace_probes,"aw","progbits""#;
-    #[cfg(target_os = "freebsd")]
-    let section_ident = r#"set_dtrace_probes,"awR","progbits""#;
-    let is_enabled = types.is_none();
-    let n_args = types.map_or(0, |typ| typ.len());
-    let arguments = types.map_or_else(String::new, |types| {
-        types
-            .iter()
-            .map(|typ| format!(".asciz \"{}\"", typ.to_c_type()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
-    format!(
-        r#"
-                    .pushsection {section_ident}
-                    .balign 8
-            991:
-                    .4byte 992f-991b    // length
-                    .byte {version}
-                    .byte {n_args}
-                    .2byte {flags}
-                    .8byte 990b         // address
-                    .asciz "{prov}"
-                    .asciz "{probe}"
-                    {arguments}         // null-terminated strings for each argument
-                    .balign 8
-            992:    .popsection
-                    {yeet}
-        "#,
-        section_ident = section_ident,
-        version = PROBE_REC_VERSION,
-        n_args = n_args,
-        flags = if is_enabled { 1 } else { 0 },
-        prov = prov,
-        probe = probe.replace("__", "-"),
-        arguments = arguments,
-        yeet = if cfg!(any(target_os = "illumos", target_os = "freebsd")) {
-            // The illumos and FreeBSD linkers may yeet our probes section into the trash under
-            // certain conditions. To counteract this, we yeet references to the
-            // probes section into another section. This causes the linker to
-            // retain the probes section.
-            r#"
-                    .pushsection yeet_dtrace_probes
-                    .8byte 991b
-                    .popsection
-                "#
-        } else {
-            ""
-        },
-    )
-}
-
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
@@ -322,7 +263,6 @@ mod test {
     use super::emit_probe_record;
     use super::process_probe_record;
     use super::process_section;
-    use super::DataType;
     use super::PROBE_REC_VERSION;
     use super::{MAX_PROBE_NAME_LEN, MAX_PROVIDER_NAME_LEN};
     use dtrace_parser::BitWidth;
@@ -495,7 +435,12 @@ mod test {
             })),
             DataType::Native(DType::String),
         ];
-        let record = emit_probe_record(provider, probe, Some(&types));
+        let record = emit_probe_record(
+            provider,
+            probe,
+            Some(&types),
+            crate::target::StandardTarget::Illumos,
+        );
         let mut lines = record.lines();
         println!("{}", record);
         lines.next(); // empty line
@@ -525,7 +470,12 @@ mod test {
             })),
             DataType::Native(dtrace_parser::DataType::String),
         ];
-        let record = emit_probe_record(provider, probe, Some(&types));
+        let record = emit_probe_record(
+            provider,
+            probe,
+            Some(&types),
+            crate::target::StandardTarget::Illumos,
+        );
         assert!(
             record.contains("my-probe"),
             "Expected double-underscores to be translated to a single dash"

@@ -299,6 +299,12 @@ pub use usdt_impl::to_json;
 pub use usdt_impl::{Error, UniqueId};
 pub use usdt_macro::dtrace_provider;
 
+// The first expansion emits consumer-cfg-gated calls to these internal macros.
+#[doc(hidden)]
+pub use usdt_attr_macro::__provider;
+#[doc(hidden)]
+pub use usdt_macro::__dtrace_provider;
+
 /// A simple struct used to build DTrace probes into Rust code in a build.rs script.
 #[derive(Debug)]
 pub struct Builder {
@@ -344,6 +350,8 @@ impl Builder {
     }
 
     /// Generate the Rust code from the D provider file, writing the result to the output file.
+    /// Backend generation is deferred until the output is included, so it uses
+    /// that compilation's target even when this builder runs on another host.
     pub fn build(self) -> Result<(), Error> {
         let source = fs::read_to_string(self.source_file)?;
         let tokens = usdt_impl::compile_provider_source(&source, &self.config)?;

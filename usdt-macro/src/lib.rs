@@ -133,3 +133,26 @@ pub fn dtrace_provider(item: proc_macro::TokenStream) -> proc_macro::TokenStream
         }
     }
 }
+
+/// Implementation entry point selected by cfg in the consuming crate.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __dtrace_provider(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    use syn::parse::Parser;
+    let parser = |input: syn::parse::ParseStream| {
+        let source: syn::LitStr = input.parse()?;
+        input.parse::<syn::Token![,]>()?;
+        let options =
+            serde_tokenstream::from_tokenstream::<usdt_impl::TargetConfig>(&input.parse()?)?;
+        usdt_impl::compile_provider_source_for_target(
+            &source.value(),
+            &options.config,
+            options.target,
+        )
+        .map_err(|error| syn::Error::new(source.span(), error.to_string()))
+    };
+    parser
+        .parse(item)
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
