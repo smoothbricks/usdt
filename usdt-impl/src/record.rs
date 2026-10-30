@@ -265,6 +265,7 @@ mod test {
     use super::process_section;
     use super::PROBE_REC_VERSION;
     use super::{MAX_PROBE_NAME_LEN, MAX_PROVIDER_NAME_LEN};
+    use crate::DataType;
     use dtrace_parser::BitWidth;
     use dtrace_parser::DataType as DType;
     use dtrace_parser::Integer;
