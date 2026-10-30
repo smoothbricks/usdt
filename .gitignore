@@ -1,1 +1,6 @@
 **/target
+# The devenv shell's generated state and untracked local additions
+/.devenv/
+/.direnv/
+/devenv.local.nix
+/.envrc-local
